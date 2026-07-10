@@ -30,7 +30,13 @@ class ApiException extends LakeException
         $message = '';
         $decoded = json_decode($responseBody, true);
         if (is_array($decoded)) {
-            $message = (string) ($decoded['message'] ?? $decoded['error'] ?? '');
+            // Bodies come as {"message": "..."}, {"error": "..."} or the
+            // query-style nested {"error": {"code": ..., "message": "..."}}.
+            $candidate = $decoded['message'] ?? $decoded['error'] ?? '';
+            if (is_array($candidate)) {
+                $candidate = $candidate['message'] ?? json_encode($candidate);
+            }
+            $message = (string) $candidate;
         }
         if ($message === '') {
             $message = $responseBody;

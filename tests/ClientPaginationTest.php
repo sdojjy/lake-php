@@ -187,6 +187,37 @@ final class ClientPaginationTest extends TestCase
         self::assertSame('Asia/Shanghai', $all[0]['ts']->getTimezone()->getName());
     }
 
+    public function testSessionEmptyObjectsSurviveRoundTrip(): void
+    {
+        // Real servers return "settings": {} in the session state and reject
+        // it when echoed back as a JSON array ("settings": []).
+        $http = new MockHttpClient([
+            $this->jsonResponse([
+                'id' => 'q-a',
+                'session' => ['database' => 'default', 'settings' => new \stdClass(), 'txn_state' => 'AutoCommit'],
+                'schema' => [['name' => 'x', 'type' => 'Int32']],
+                'data' => [['1']],
+                'state' => 'Succeeded',
+                'next_uri' => '',
+            ]),
+            $this->jsonResponse([
+                'id' => 'q-b',
+                'schema' => [['name' => 'x', 'type' => 'Int32']],
+                'data' => [['2']],
+                'state' => 'Succeeded',
+                'next_uri' => '',
+            ]),
+        ]);
+
+        $config = Config::fromDsn('lake://u:p@localhost/db?sslmode=disable&login=disable');
+        $conn = (new Client($config, $http))->connect();
+        $conn->queryRow('SELECT 1 AS x');
+        $conn->queryRow('SELECT 2 AS x');
+
+        self::assertStringContainsString('"settings":{}', $http->bodies[1]);
+        self::assertStringContainsString('"txn_state":"AutoCommit"', $http->bodies[1]);
+    }
+
     public function testStickyNodeHeaderWhenSessionNeedsSticky(): void
     {
         $http = new MockHttpClient([

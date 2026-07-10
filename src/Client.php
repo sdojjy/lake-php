@@ -46,8 +46,22 @@ final class Client
     private bool $initialized = false;
     private bool $loggedIn = false;
 
-    /** Client-side session state, updated from every query response. */
-    private array $sessionState;
+    /**
+     * Client-side session state, updated from every query response and
+     * echoed back verbatim on the next request. Kept as stdClass once it
+     * comes from the server so that empty JSON objects (e.g. "settings": {})
+     * survive the round trip — PHP assoc arrays would re-encode them as [].
+     */
+    private array|\stdClass $sessionState;
+
+    /**
+     * Domain-ignoring cookie store, parity with lake-go's
+     * IgnoreDomainCookieJar. The server requires cookie_enabled=true and
+     * tracks the session via a session_id cookie.
+     *
+     * @var array<string, string>
+     */
+    private array $cookies = ['cookie_enabled' => 'true'];
 
     public function __construct(
         public readonly Config $config,
@@ -135,7 +149,7 @@ final class Client
      */
     public function logout(): void
     {
-        if (!$this->loggedIn && !($this->sessionState['need_keep_alive'] ?? false)) {
+        if (!$this->loggedIn && !$this->sessionValue('need_keep_alive')) {
             return;
         }
         try {
@@ -155,7 +169,7 @@ final class Client
     {
         $this->ensureInitialized();
         $this->querySeq++;
-        if (($this->sessionState['txn_state'] ?? '') !== 'Active') {
+        if ($this->sessionValue('txn_state') !== 'Active') {
             $this->routeHint = self::randRouteHint();
         }
 
@@ -166,13 +180,13 @@ final class Client
         }
         $body['session'] = $this->sessionState === [] ? new \stdClass() : $this->sessionState;
 
-        [$data, $response] = $this->withRetry(
+        [$data, $response, $raw] = $this->withRetry(
             fn (): array => $this->doRequest('POST', '/v1/query', $body, $this->needSticky()),
             attempts: 5,
             delaySeconds: 2.0,
         );
 
-        return $this->finalizeResponse($data, $response);
+        return $this->finalizeResponse($data, $response, $raw);
     }
 
     /**
@@ -180,13 +194,13 @@ final class Client
      */
     public function pollQuery(string $nextUri): QueryResponse
     {
-        [$data, $response] = $this->withRetry(
+        [$data, $response, $raw] = $this->withRetry(
             fn (): array => $this->doRequest('GET', $nextUri, null, true),
             attempts: 3,
             delaySeconds: 1.0,
         );
 
-        return $this->finalizeResponse($data, $response);
+        return $this->finalizeResponse($data, $response, $raw);
     }
 
     /**
@@ -328,11 +342,20 @@ final class Client
 
     private function needSticky(): bool
     {
-        return (bool) ($this->sessionState['need_sticky'] ?? false);
+        return (bool) $this->sessionValue('need_sticky');
+    }
+
+    private function sessionValue(string $key): mixed
+    {
+        if (is_object($this->sessionState)) {
+            return $this->sessionState->{$key} ?? null;
+        }
+
+        return $this->sessionState[$key] ?? null;
     }
 
     /**
-     * @return array{0: ?array, 1: ResponseInterface} decoded JSON body and PSR-7 response
+     * @return array{0: ?array, 1: ResponseInterface, 2: string} decoded JSON body, PSR-7 response, raw body
      */
     private function doRequest(string $method, string $uri, ?array $body, bool $needSticky): array
     {
@@ -358,8 +381,10 @@ final class Client
                 : json_encode($body, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
             $request = $request->withBody($this->streamFactory->createStream($json));
         }
+        $request = $request->withHeader('Cookie', $this->cookieHeader());
 
         $response = $this->http->sendRequest($request);
+        $this->storeCookies($response);
         $raw = (string) $response->getBody();
 
         if ($response->getStatusCode() !== 200) {
@@ -374,19 +399,25 @@ final class Client
             }
         }
 
-        return [$decoded, $response];
+        return [$decoded, $response, $raw];
     }
 
-    private function finalizeResponse(?array $data, ResponseInterface $httpResponse): QueryResponse
+    private function finalizeResponse(?array $data, ResponseInterface $httpResponse, string $raw = ''): QueryResponse
     {
         $response = QueryResponse::fromArray($data ?? []);
         if ($response->nodeId !== '') {
             $this->nodeId = $response->nodeId;
         }
         // Update session state even when the query failed, e.g. a failed
-        // COMMIT must still refresh the transaction state.
+        // COMMIT must still refresh the transaction state. The state is kept
+        // as stdClass (raw object decode) so it round-trips verbatim,
+        // matching lake-go's json.RawMessage handling: assoc arrays would
+        // turn "settings": {} into "settings": [] and break the server.
         if ($response->session !== null) {
-            $this->sessionState = $response->session;
+            $rawObject = $raw !== '' ? json_decode($raw) : null;
+            $this->sessionState = is_object($rawObject) && isset($rawObject->session) && is_object($rawObject->session)
+                ? $rawObject->session
+                : $response->session;
         }
         $routeHint = $httpResponse->getHeaderLine(self::HEADER_ROUTE_HINT);
         if ($routeHint !== '') {
@@ -443,6 +474,31 @@ final class Client
                     throw new LakeException('http request failed: ' . $e->getMessage(), 0, $e);
                 }
                 usleep((int) ($delaySeconds * 1_000_000));
+            }
+        }
+    }
+
+    private function cookieHeader(): string
+    {
+        $pairs = [];
+        foreach ($this->cookies as $name => $value) {
+            $pairs[] = $name . '=' . $value;
+        }
+
+        return implode('; ', $pairs);
+    }
+
+    private function storeCookies(ResponseInterface $response): void
+    {
+        foreach ($response->getHeader('Set-Cookie') as $line) {
+            $pair = explode(';', $line, 2)[0];
+            $eq = strpos($pair, '=');
+            if ($eq === false) {
+                continue;
+            }
+            $name = trim(substr($pair, 0, $eq));
+            if ($name !== '') {
+                $this->cookies[$name] = trim(substr($pair, $eq + 1));
             }
         }
     }
