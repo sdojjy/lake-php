@@ -1,6 +1,6 @@
 # lake-php
 
-![CI](https://github.com/tidbcloud/lake-php/actions/workflows/ci.yaml/badge.svg)
+![CI](https://github.com/sdojjy/lake-php/actions/workflows/ci.yaml/badge.svg)
 
 PHP driver for TiDB Cloud Lake, speaking the Lake HTTP API.
 This is a pure-PHP port of the HTTP JSON transport implemented by
@@ -11,7 +11,7 @@ Requires **PHP >= 8.1** with `ext-json`.
 ## Installation
 
 ```bash
-composer require tidbcloud/lake-php
+composer require sdojjy/lake-php
 ```
 
 While the package is not yet published on Packagist, add it as a VCS repository:
@@ -19,10 +19,10 @@ While the package is not yet published on Packagist, add it as a VCS repository:
 ```json
 {
     "repositories": [
-        {"type": "vcs", "url": "https://github.com/tidbcloud/lake-php"}
+        {"type": "vcs", "url": "https://github.com/sdojjy/lake-php"}
     ],
     "require": {
-        "tidbcloud/lake-php": "dev-main"
+        "sdojjy/lake-php": "dev-main"
     }
 }
 ```

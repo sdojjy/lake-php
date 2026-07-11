@@ -1,5 +1,5 @@
 {
-    "name": "tidbcloud/lake-php",
+    "name": "sdojjy/lake-php",
     "description": "PHP driver for TiDB Cloud Lake (HTTP API)",
     "type": "library",
     "license": "Apache-2.0",
