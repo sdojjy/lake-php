@@ -16,7 +16,7 @@ use TiDBCloud\Lake\Exception\LakeException;
 use TiDBCloud\Lake\Exception\QueryException;
 
 /**
- * Low-level HTTP client for the Lake (Databend-compatible) HTTP API,
+ * Low-level HTTP client for the Lake HTTP API,
  * mirroring lake-go's APIClient.
  *
  * The HTTP transport is any PSR-18 client; Guzzle is used by default.

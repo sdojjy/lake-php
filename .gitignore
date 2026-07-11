@@ -1,3 +1,5 @@
 /vendor/
 /composer.lock
 /.phpunit.cache/
+/tests/docker/data/
+/LAKE_PHP_TEST_REPORT.md

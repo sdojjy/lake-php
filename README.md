@@ -2,8 +2,7 @@
 
 ![CI](https://github.com/tidbcloud/lake-php/actions/workflows/ci.yaml/badge.svg)
 
-PHP driver for TiDB Cloud Lake, speaking the Databend-compatible HTTP API
-(see the [Databend HTTP handler docs](https://docs.databend.com/developer/apis/http)).
+PHP driver for TiDB Cloud Lake, speaking the Lake HTTP API.
 This is a pure-PHP port of the HTTP JSON transport implemented by
 [`lake-go`](https://github.com/tidbcloud/lake-go) — no PHP extension, no Arrow.
 
@@ -250,11 +249,15 @@ composer test
 # or, without a local PHP installation:
 make test-docker
 
-# Start the lakesql Databend Docker stack and run live integration tests.
-make integration-docker
+# Start a local Lake server stack (minio + meta + query) in Docker and run
+# the integration test group against it, then tear it down:
+make integration
 ```
 
 Unit tests run against an in-memory PSR-18 mock — no server or network is
-required. CI (`.github/workflows/ci.yaml`) runs them on PHP 8.1–8.4 for every
-push and pull request against `main`. Integration tests are gated by
-`LAKE_DSN`; without it they are skipped.
+required. Integration tests (`tests/Integration/`, `@group integration`) are
+gated by `LAKE_DSN` and skipped without it; `make integration` provisions a
+self-contained server stack under `tests/docker/` and can also be pointed at
+any real warehouse via `IT_DSN=...`. CI (`.github/workflows/ci.yaml`) runs
+the unit matrix on PHP 8.1–8.4 plus the dockerized integration job for every
+push and pull request against `main`.

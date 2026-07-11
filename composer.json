@@ -1,9 +1,9 @@
 {
     "name": "tidbcloud/lake-php",
-    "description": "PHP driver for TiDB Cloud Lake (Databend-compatible HTTP API)",
+    "description": "PHP driver for TiDB Cloud Lake (HTTP API)",
     "type": "library",
     "license": "Apache-2.0",
-    "keywords": ["tidbcloud", "lake", "databend", "database", "driver", "sql"],
+    "keywords": ["tidbcloud", "lake", "database", "driver", "sql"],
     "require": {
         "php": ">=8.1",
         "ext-json": "*",

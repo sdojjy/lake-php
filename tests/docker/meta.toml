@@ -1,0 +1,12 @@
+log_dir                 = "./.data/meta-logs"
+admin_api_address       = "0.0.0.0:28101"
+grpc_api_address        = "0.0.0.0:9191"
+grpc_api_advertise_host = "meta"
+
+[raft_config]
+id                  = 1
+raft_dir            = "./.data/meta-raft"
+raft_api_port       = 28103
+raft_listen_host    = "0.0.0.0"
+raft_advertise_host = "meta"
+single              = true

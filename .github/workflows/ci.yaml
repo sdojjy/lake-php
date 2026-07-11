@@ -55,3 +55,13 @@ jobs:
 
       - name: Unit tests
         run: composer test
+
+  integration:
+    runs-on: ubuntu-latest
+    name: Integration tests (dockerized Lake server)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run integration tests
+        run: make integration
