@@ -100,11 +100,56 @@ $conn->close(); // best-effort POST /v1/session/logout
 
 ### Parameter binding
 
-Positional `?` placeholders only. Because the Lake HTTP protocol has no
-server-side prepared statements, values are interpolated client-side as
-escaped SQL literals (same as `lake-go`). Supported types: `null`, `bool`,
-`int`, `float`, `string`, `DateTimeInterface`, and list arrays. Pass decimals
-as strings to avoid float precision loss.
+Supports positional `?` placeholders and named `:name` placeholders. Because
+the Lake HTTP protocol has no server-side prepared statements, values are
+interpolated client-side as escaped SQL literals (same as `lake-go`).
+Supported types: `null`, `bool`, `int`, `float`, `string`,
+`DateTimeInterface`, and list arrays. Pass decimals as strings to avoid float
+precision loss.
+
+Named mode is used only when the params array has string keys. With a plain
+list, `:x` tokens stay literal, so VARIANT path access (`SELECT v:name FROM t
+WHERE id = ?`) works with positional params.
+
+```php
+$conn->queryRow('SELECT :id AS id, :name AS name', [
+    'id' => 1,
+    'name' => 'alice',
+]);
+```
+
+### Utilities
+
+```php
+$conn->ping();              // POST /v1/verify
+$info = $conn->info();      // handler, host, port, user, database, warehouse
+$version = $conn->version();
+
+$conn->transaction(function (Connection $tx) {
+    $tx->execute('INSERT INTO books VALUES (?, ?)', ['Dune', 19.9]);
+});
+```
+
+### Stage Loading
+
+`loadFile()`, `streamLoad()`, and `batchInsert()` upload CSV data to the user
+stage and run the statement with `stage_attachment`.
+
+```php
+$conn->loadFile('INSERT INTO books VALUES', '/tmp/books.csv');
+
+$conn->streamLoad('INSERT INTO books VALUES', [
+    ['Dune', 19.9],
+    ['Foundation', 14.5],
+]);
+
+$conn->batchInsert('INSERT INTO books VALUES', [
+    ['Hyperion', 12.0],
+]);
+```
+
+Set `presigned_url_disabled=true` in the DSN to force `/v1/upload_to_stage`
+instead of presigned URL upload.
 
 ### Type mapping
 
@@ -193,8 +238,8 @@ public function index(Connection $lake)
 ## Not in this version (roadmap)
 
 - Arrow result transport (JSON only)
-- Stage upload / batch insert (`lake-go`'s `batch.go`)
-- Named parameters, `access_token_file` rotation, multi-statement transactions
+- Server-side prepared statements (the HTTP API is client-interpolated)
+- Laravel-specific package/service provider
 
 ## Development
 
@@ -204,8 +249,12 @@ composer test
 
 # or, without a local PHP installation:
 make test-docker
+
+# Start the lakesql Databend Docker stack and run live integration tests.
+make integration-docker
 ```
 
 Unit tests run against an in-memory PSR-18 mock — no server or network is
 required. CI (`.github/workflows/ci.yaml`) runs them on PHP 8.1–8.4 for every
-push and pull request against `main`.
+push and pull request against `main`. Integration tests are gated by
+`LAKE_DSN`; without it they are skipped.

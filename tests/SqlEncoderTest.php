@@ -83,11 +83,52 @@ final class SqlEncoderTest extends TestCase
         self::assertSame("SELECT 1, 'x'", SqlEncoder::interpolate('SELECT ?, ?', $params));
     }
 
+    public function testNamedParams(): void
+    {
+        self::assertSame(
+            "SELECT 1, 'x', 1",
+            SqlEncoder::interpolate('SELECT :a, :b, :a', ['a' => 1, 'b' => 'x']),
+        );
+    }
+
+    public function testNamedParamsIgnoreCastsAndQuotedStrings(): void
+    {
+        self::assertSame(
+            "SELECT 'x:y', 1::Int32, 'alice'",
+            SqlEncoder::interpolate("SELECT 'x:y', 1::Int32, :name", ['name' => 'alice']),
+        );
+    }
+
+    public function testMissingNamedParam(): void
+    {
+        $this->expectException(LakeException::class);
+        $this->expectExceptionMessage('missing named SQL parameter: b');
+        SqlEncoder::interpolate('SELECT :a, :b', ['a' => 1]);
+    }
+
+    public function testVariantPathAccessWithPositionalParams(): void
+    {
+        // ":" is Lake's VARIANT path syntax; list params must keep it literal.
+        self::assertSame(
+            'SELECT v:name FROM t WHERE id = 1',
+            SqlEncoder::interpolate('SELECT v:name FROM t WHERE id = ?', [1]),
+        );
+    }
+
+    public function testVariantPathAccessWithoutParams(): void
+    {
+        self::assertSame(
+            'SELECT v:name FROM t',
+            SqlEncoder::interpolate('SELECT v:name FROM t', []),
+        );
+    }
+
     public function testPlaceholderPositions(): void
     {
         self::assertSame([7, 10], SqlEncoder::placeholders('SELECT ?, ?'));
         self::assertSame([], SqlEncoder::placeholders("SELECT '?'"));
         self::assertSame([], SqlEncoder::placeholders('SELECT 1'));
+        self::assertSame([['pos' => 7, 'len' => 2, 'name' => 'x']], SqlEncoder::namedPlaceholders('SELECT :x'));
     }
 
     public function testFloatSpecialValues(): void

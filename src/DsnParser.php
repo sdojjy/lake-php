@@ -23,7 +23,6 @@ final class DsnParser
     private const IGNORED_OPTIONS = [
         'debug',
         'enable_http_compression',
-        'presigned_url_disabled',
         'enable_otel',
         'tls_config',
     ];
@@ -120,7 +119,11 @@ final class DsnParser
                     $cfg->accessToken = $value;
                     break;
                 case 'access_token_file':
-                    throw new LakeException('access_token_file is not supported by lake-php yet, pass access_token instead');
+                    $cfg->accessTokenFile = $value;
+                    break;
+                case 'presigned_url_disabled':
+                    $cfg->presignedUrlDisabled = self::parseBool($key, $value);
+                    break;
                 case 'sslmode':
                     $cfg->sslMode = $value;
                     break;
@@ -201,6 +204,16 @@ final class DsnParser
         }
 
         return (int) $value;
+    }
+
+    private static function parseBool(string $key, string $value): bool
+    {
+        $parsed = filter_var($value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+        if ($parsed === null) {
+            throw new LakeException(sprintf('invalid %s: %s', $key, $value));
+        }
+
+        return $parsed;
     }
 
     /**

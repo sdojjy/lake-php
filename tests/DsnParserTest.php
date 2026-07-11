@@ -98,6 +98,13 @@ final class DsnParserTest extends TestCase
         self::assertSame('', $cfg->user);
     }
 
+    public function testAccessTokenFileAndPresignedUrlDisabled(): void
+    {
+        $cfg = Config::fromDsn('lake://h:443/db?access_token_file=/tmp/token.toml&presigned_url_disabled=true');
+        self::assertSame('/tmp/token.toml', $cfg->accessTokenFile);
+        self::assertTrue($cfg->presignedUrlDisabled);
+    }
+
     public function testUnknownParamsBecomeSessionSettings(): void
     {
         $cfg = Config::fromDsn('lake://u:p@h/db?binary_output_format=base64&http_json_result_mode=display&empty_field_as=null');

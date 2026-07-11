@@ -23,11 +23,21 @@ final class SqlEncoder
         if (is_object($params)) {
             $params = get_object_vars($params);
         }
-        $params = array_values($params);
         if ($params === []) {
             return $sql;
         }
 
+        // Named mode requires associative params: Lake SQL uses ":" for
+        // VARIANT path access (v:name), so a list of params must never make
+        // those tokens act as placeholders.
+        if (!array_is_list($params)) {
+            $named = self::namedPlaceholders($sql);
+            if ($named !== []) {
+                return self::interpolateNamed($sql, $params, $named);
+            }
+        }
+
+        $params = array_values($params);
         $positions = self::placeholders($sql);
         if (count($positions) !== count($params)) {
             throw new LakeException(sprintf('expected %d parameters, got %d', count($positions), count($params)));
@@ -70,6 +80,67 @@ final class SqlEncoder
         }
 
         return $positions;
+    }
+
+    /**
+     * @return list<array{pos: int, len: int, name: string}>
+     */
+    public static function namedPlaceholders(string $sql): array
+    {
+        $positions = [];
+        $inQuote = false;
+        $len = strlen($sql);
+        for ($i = 0; $i < $len; $i++) {
+            switch ($sql[$i]) {
+                case '\\':
+                    $i++;
+                    break;
+                case "'":
+                    $inQuote = !$inQuote;
+                    break;
+                case ':':
+                    if ($inQuote || ($i > 0 && $sql[$i - 1] === ':')) {
+                        break;
+                    }
+                    $next = $sql[$i + 1] ?? '';
+                    if ($next === '' || preg_match('/[A-Za-z_]/', $next) !== 1) {
+                        break;
+                    }
+                    $j = $i + 2;
+                    while ($j < $len && preg_match('/[A-Za-z0-9_]/', $sql[$j]) === 1) {
+                        $j++;
+                    }
+                    $positions[] = ['pos' => $i, 'len' => $j - $i, 'name' => substr($sql, $i + 1, $j - $i - 1)];
+                    $i = $j - 1;
+                    break;
+            }
+        }
+
+        return $positions;
+    }
+
+    /**
+     * @param array<string|int, mixed> $params
+     * @param list<array{pos: int, len: int, name: string}> $positions
+     */
+    private static function interpolateNamed(string $sql, array $params, array $positions): string
+    {
+        if (self::placeholders($sql) !== []) {
+            throw new LakeException('cannot mix named and positional SQL parameters');
+        }
+
+        $out = '';
+        $prev = 0;
+        foreach ($positions as $placeholder) {
+            $name = $placeholder['name'];
+            if (!array_key_exists($name, $params)) {
+                throw new LakeException('missing named SQL parameter: ' . $name);
+            }
+            $out .= substr($sql, $prev, $placeholder['pos'] - $prev) . self::encodeValue($params[$name]);
+            $prev = $placeholder['pos'] + $placeholder['len'];
+        }
+
+        return $out . substr($sql, $prev);
     }
 
     public static function encodeValue(mixed $value): string

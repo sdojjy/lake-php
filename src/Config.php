@@ -31,6 +31,9 @@ final class Config
     /** Static bearer token; used when user/password are not set. */
     public string $accessToken = '';
 
+    /** File containing a bearer token, or TOML with `access_token = "..."`. */
+    public string $accessTokenFile = '';
+
     /** HTTP timeout in seconds; 0 means no explicit timeout. */
     public float $timeout = 0.0;
 
@@ -47,6 +50,9 @@ final class Config
 
     /** How empty CSV fields are loaded (stage/batch insert, phase 2). */
     public string $emptyFieldAs = 'string';
+
+    /** Use /v1/upload_to_stage instead of presigned URLs. */
+    public bool $presignedUrlDisabled = false;
 
     /** Whether to POST /v1/session/login when the connection opens. */
     public bool $loginEnabled = true;

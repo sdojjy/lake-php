@@ -34,6 +34,13 @@ final class Client
     public const HEADER_STICKY_NODE = 'X-DATABEND-STICKY-NODE';
     public const HEADER_NODE_ID = 'X-DATABEND-NODE-ID';
 
+    private const DEFAULT_CSV_FORMAT_OPTIONS = [
+        'type' => 'CSV',
+        'field_delimiter' => ',',
+        'record_delimiter' => "\n",
+        'skip_header' => '0',
+    ];
+
     private PsrClientInterface $http;
     private RequestFactoryInterface $requestFactory;
     private StreamFactoryInterface $streamFactory;
@@ -167,13 +174,107 @@ final class Client
      */
     public function startQuery(string $sql): QueryResponse
     {
+        return $this->startQueryRequest(['sql' => $sql]);
+    }
+
+    /**
+     * Runs an INSERT/REPLACE with a stage attachment after the caller has
+     * uploaded data to the given stage location.
+     *
+     * @param array<string, string>|null $fileFormatOptions
+     * @param array<string, string>|null $copyOptions
+     */
+    public function insertWithStage(
+        string $sql,
+        string $stageName,
+        string $stagePath,
+        ?array $fileFormatOptions = null,
+        ?array $copyOptions = null,
+    ): QueryResponse {
+        $fileFormatOptions ??= $this->defaultCsvFormatOptions();
+        $copyOptions ??= ['purge' => 'true'];
+
+        $response = $this->startQueryRequest([
+            'sql' => $sql,
+            'stage_attachment' => [
+                'location' => $this->stageLocation($stageName, $stagePath),
+                'file_format_options' => $fileFormatOptions,
+                'copy_options' => $copyOptions,
+            ],
+        ]);
+
+        try {
+            return $this->waitForResults($response);
+        } finally {
+            $this->closeQuery($response);
+        }
+    }
+
+    /**
+     * Uploads a local file to a stage path. Uses PRESIGN by default and falls
+     * back to /v1/upload_to_stage when `presigned_url_disabled=true`.
+     */
+    public function uploadToStage(string $stageName, string $stagePath, string $file): void
+    {
+        if (!is_file($file) || !is_readable($file)) {
+            throw new LakeException('stage upload file is not readable: ' . $file);
+        }
+
+        if ($this->config->presignedUrlDisabled) {
+            $this->uploadToStageByApi($stageName, $stagePath, $file);
+        } else {
+            $this->uploadToStageByPresignedUrl($stageName, $stagePath, $file);
+        }
+    }
+
+    /**
+     * POST /v1/verify.
+     *
+     * @return array<string, mixed>
+     */
+    public function verify(): array
+    {
+        $this->ensureInitialized();
+        [$data] = $this->withRetry(
+            fn (): array => $this->doRequest('POST', '/v1/verify', [], false),
+            attempts: 3,
+            delaySeconds: 1.0,
+        );
+
+        return $data ?? [];
+    }
+
+    public function ping(): void
+    {
+        $this->verify();
+    }
+
+    /**
+     * @return array{handler: string, host: string, port: int, user: string, database: string, warehouse: string}
+     */
+    public function info(): array
+    {
+        [$host, $port] = $this->splitHostPort($this->config->host);
+
+        return [
+            'handler' => $this->config->sslMode === Config::SSL_MODE_DISABLE ? 'http' : 'https',
+            'host' => $host,
+            'port' => $port,
+            'user' => $this->config->user,
+            'database' => $this->config->database,
+            'warehouse' => $this->config->warehouse,
+        ];
+    }
+
+    private function startQueryRequest(array $requestBody): QueryResponse
+    {
         $this->ensureInitialized();
         $this->querySeq++;
         if ($this->sessionValue('txn_state') !== 'Active') {
             $this->routeHint = self::randRouteHint();
         }
 
-        $body = ['sql' => $sql];
+        $body = $requestBody;
         $pagination = $this->paginationConfig();
         if ($pagination !== null) {
             $body['pagination'] = $pagination;
@@ -284,8 +385,8 @@ final class Client
 
         if ($this->config->user !== '') {
             $headers['Authorization'] = 'Basic ' . base64_encode($this->config->user . ':' . $this->config->password);
-        } elseif ($this->config->accessToken !== '') {
-            $headers['Authorization'] = 'Bearer ' . $this->config->accessToken;
+        } elseif ($this->config->accessToken !== '' || $this->config->accessTokenFile !== '') {
+            $headers['Authorization'] = 'Bearer ' . $this->loadAccessToken();
         } else {
             throw new LakeException('no user password or access token');
         }
@@ -387,15 +488,26 @@ final class Client
         $this->storeCookies($response);
         $raw = (string) $response->getBody();
 
+        if ($response->getStatusCode() === 401 && $this->config->accessTokenFile !== '') {
+            $request = $request->withHeader('Authorization', 'Bearer ' . $this->loadAccessToken());
+            $response = $this->http->sendRequest($request);
+            $this->storeCookies($response);
+            $raw = (string) $response->getBody();
+        }
+
         if ($response->getStatusCode() !== 200) {
             throw ApiException::fromResponse($response->getStatusCode(), $raw);
         }
 
         $decoded = null;
         if ($raw !== '') {
-            $decoded = json_decode($raw, true);
+            try {
+                $decoded = json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
+            } catch (\JsonException $e) {
+                throw new LakeException('failed to decode JSON response body', 0, $e);
+            }
             if (!is_array($decoded)) {
-                $decoded = null;
+                throw new LakeException('unexpected JSON response body type: ' . get_debug_type($decoded));
             }
         }
 
@@ -501,6 +613,142 @@ final class Client
                 $this->cookies[$name] = trim(substr($pair, $eq + 1));
             }
         }
+    }
+
+    private function loadAccessToken(): string
+    {
+        if ($this->config->accessToken !== '') {
+            return $this->config->accessToken;
+        }
+        if ($this->config->accessTokenFile === '') {
+            throw new LakeException('no user password or access token');
+        }
+
+        $content = @file_get_contents($this->config->accessTokenFile);
+        if ($content === false) {
+            throw new LakeException('failed to read access_token_file: ' . $this->config->accessTokenFile);
+        }
+        $content = trim($content);
+        if (preg_match('/^\s*access_token\s*=\s*["\']?([^"\'\r\n]+)["\']?\s*$/m', $content, $m) === 1) {
+            return trim($m[1]);
+        }
+
+        return $content;
+    }
+
+    /**
+     * @return array{method: string, headers: array<string, string>, url: string}
+     */
+    private function getPresignedUrl(string $stageName, string $stagePath): array
+    {
+        $response = $this->startQuery('PRESIGN UPLOAD ' . $this->stageLocation($stageName, $stagePath));
+        try {
+            $response = $this->waitForResults($response);
+            $row = $response->typedRows[0] ?? null;
+            if (!is_array($row) || count($row) < 3) {
+                throw new LakeException('generate presign url invalid response');
+            }
+            $headers = json_decode((string) $row[1], true);
+            if (!is_array($headers)) {
+                throw new LakeException('failed to decode presigned upload headers');
+            }
+
+            return [
+                'method' => (string) $row[0],
+                'headers' => array_map('strval', $headers),
+                'url' => (string) $row[2],
+            ];
+        } finally {
+            $this->closeQuery($response);
+        }
+    }
+
+    private function uploadToStageByPresignedUrl(string $stageName, string $stagePath, string $file): void
+    {
+        $presigned = $this->getPresignedUrl($stageName, $stagePath);
+        $stream = fopen($file, 'rb');
+        if ($stream === false) {
+            throw new LakeException('failed to open upload file: ' . $file);
+        }
+        try {
+            $request = $this->requestFactory->createRequest($presigned['method'] ?: 'PUT', $presigned['url'])
+                ->withBody($this->streamFactory->createStreamFromResource($stream))
+                ->withHeader('Content-Length', (string) filesize($file));
+            foreach ($presigned['headers'] as $name => $value) {
+                $request = $request->withHeader($name, $value);
+            }
+            $response = $this->http->sendRequest($request);
+            $raw = (string) $response->getBody();
+            if ($response->getStatusCode() >= 400) {
+                throw new LakeException(sprintf(
+                    'failed to upload to stage by presigned url, status code: %d, body: %s',
+                    $response->getStatusCode(),
+                    $raw,
+                ));
+            }
+        } finally {
+            if (is_resource($stream)) {
+                fclose($stream);
+            }
+        }
+    }
+
+    private function uploadToStageByApi(string $stageName, string $stagePath, string $file): void
+    {
+        $boundary = 'lake-php-' . bin2hex(random_bytes(12));
+        $contents = file_get_contents($file);
+        if ($contents === false) {
+            throw new LakeException('failed to read upload file: ' . $file);
+        }
+        $body = "--{$boundary}\r\n"
+            . 'Content-Disposition: form-data; name="upload"; filename="' . addcslashes($stagePath, "\\\"") . "\"\r\n"
+            . "Content-Type: application/octet-stream\r\n\r\n"
+            . $contents . "\r\n"
+            . "--{$boundary}--\r\n";
+
+        $request = $this->requestFactory->createRequest('PUT', $this->endpoint . '/v1/upload_to_stage')
+            ->withBody($this->streamFactory->createStream($body))
+            ->withHeader('Content-Type', 'multipart/form-data; boundary=' . $boundary)
+            ->withHeader('X-DATABEND-STAGE-NAME', $stageName)
+            ->withHeader('stage-name', $stageName)
+            ->withHeader('stage_name', $stageName)
+            ->withHeader('Cookie', $this->cookieHeader());
+        foreach ($this->makeHeaders() as $name => $value) {
+            $request = $request->withHeader($name, $value);
+        }
+
+        $response = $this->http->sendRequest($request);
+        $this->storeCookies($response);
+        $raw = (string) $response->getBody();
+        if ($response->getStatusCode() >= 400) {
+            throw ApiException::fromResponse($response->getStatusCode(), $raw);
+        }
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function defaultCsvFormatOptions(): array
+    {
+        return self::DEFAULT_CSV_FORMAT_OPTIONS + ['empty_field_as' => $this->config->emptyFieldAs];
+    }
+
+    private function stageLocation(string $stageName, string $stagePath): string
+    {
+        return '@' . $stageName . '/' . ltrim($stagePath, '/');
+    }
+
+    /**
+     * @return array{0: string, 1: int}
+     */
+    private function splitHostPort(string $hostPort): array
+    {
+        $pos = strrpos($hostPort, ':');
+        if ($pos === false) {
+            return [$hostPort, $this->config->sslMode === Config::SSL_MODE_DISABLE ? 80 : 443];
+        }
+
+        return [substr($hostPort, 0, $pos), (int) substr($hostPort, $pos + 1)];
     }
 
     private static function uuid4(): string

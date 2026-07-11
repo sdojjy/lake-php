@@ -8,6 +8,7 @@ use GuzzleHttp\Psr7\Response;
 use PHPUnit\Framework\TestCase;
 use TiDBCloud\Lake\Client;
 use TiDBCloud\Lake\Config;
+use TiDBCloud\Lake\Exception\LakeException;
 use TiDBCloud\Lake\Exception\QueryException;
 use TiDBCloud\Lake\Tests\Support\MockHttpClient;
 
@@ -247,5 +248,150 @@ final class ClientPaginationTest extends TestCase
         $conn->queryRow('SELECT 2 AS x');
 
         self::assertSame('node-z', $http->requests[1]->getHeaderLine(Client::HEADER_STICKY_NODE));
+    }
+
+    public function testInvalidJsonResponseThrows(): void
+    {
+        $http = new MockHttpClient([
+            new Response(200, ['Content-Type' => 'application/json'], 'not-json'),
+        ]);
+
+        $this->expectException(LakeException::class);
+        $this->expectExceptionMessage('failed to decode JSON response body');
+
+        $config = Config::fromDsn('lake://u:p@localhost/db?sslmode=disable&login=disable');
+        (new Client($config, $http))->connect()->queryRow('SELECT 1');
+    }
+
+    public function testAccessTokenFileHeader(): void
+    {
+        $tokenFile = tempnam(sys_get_temp_dir(), 'lake-token-');
+        file_put_contents($tokenFile, 'access_token = "file-token"');
+        try {
+            $http = new MockHttpClient([
+                $this->jsonResponse([
+                    'id' => 'q-token',
+                    'schema' => [['name' => 'x', 'type' => 'Int32']],
+                    'data' => [['1']],
+                    'state' => 'Succeeded',
+                    'next_uri' => '',
+                ]),
+            ]);
+            $config = Config::fromDsn('lake://localhost/db?sslmode=disable&login=disable&access_token_file=' . rawurlencode($tokenFile));
+            (new Client($config, $http))->connect()->queryRow('SELECT 1');
+
+            self::assertSame('Bearer file-token', $http->requests[0]->getHeaderLine('Authorization'));
+        } finally {
+            @unlink($tokenFile);
+        }
+    }
+
+    public function testVerifyVersionInfoAndTransactionHelpers(): void
+    {
+        $http = new MockHttpClient([
+            $this->jsonResponse(['tenant' => 't1', 'user' => 'u']),
+            $this->jsonResponse([
+                'id' => 'q-version',
+                'schema' => [['name' => 'version', 'type' => 'String']],
+                'data' => [['1.2.3']],
+                'state' => 'Succeeded',
+                'next_uri' => '',
+            ]),
+            $this->jsonResponse(['id' => 'q-begin', 'state' => 'Succeeded', 'next_uri' => '']),
+            $this->jsonResponse(['id' => 'q-commit', 'state' => 'Succeeded', 'next_uri' => '']),
+        ]);
+
+        $config = Config::fromDsn('lake://u:p@localhost:8000/db?sslmode=disable&login=disable&warehouse=wh');
+        $conn = (new Client($config, $http))->connect();
+
+        self::assertSame('u', $conn->verify()['user']);
+        self::assertSame('1.2.3', $conn->version());
+        self::assertSame([
+            'handler' => 'http',
+            'host' => 'localhost',
+            'port' => 8000,
+            'user' => 'u',
+            'database' => 'db',
+            'warehouse' => 'wh',
+        ], $conn->info());
+
+        $conn->begin();
+        $conn->commit();
+
+        self::assertSame('/v1/verify', $http->requests[0]->getUri()->getPath());
+        self::assertStringContainsString('"sql":"BEGIN"', $http->bodies[2]);
+        self::assertStringContainsString('"sql":"COMMIT"', $http->bodies[3]);
+    }
+
+    public function testLoadFileWithPresignedStageUpload(): void
+    {
+        $file = tempnam(sys_get_temp_dir(), 'lake-load-');
+        file_put_contents($file, "1,a\n");
+        try {
+            $http = new MockHttpClient([
+                $this->jsonResponse([
+                    'id' => 'q-presign',
+                    'schema' => [
+                        ['name' => 'method', 'type' => 'String'],
+                        ['name' => 'headers', 'type' => 'String'],
+                        ['name' => 'url', 'type' => 'String'],
+                    ],
+                    'data' => [['PUT', '{"x-upload":"1"}', 'https://upload.example/object']],
+                    'state' => 'Succeeded',
+                    'next_uri' => '',
+                ]),
+                new Response(200, [], ''),
+                $this->jsonResponse([
+                    'id' => 'q-insert-stage',
+                    'schema' => [['name' => 'number of rows inserted', 'type' => 'UInt64']],
+                    'data' => [['1']],
+                    'state' => 'Succeeded',
+                    'next_uri' => '',
+                ]),
+            ]);
+
+            $config = Config::fromDsn('lake://u:p@localhost/db?sslmode=disable&login=disable');
+            $affected = (new Client($config, $http))->connect()->loadFile('INSERT INTO t VALUES', $file);
+
+            self::assertSame(1, $affected);
+            self::assertStringContainsString('PRESIGN UPLOAD @~/load/', $http->bodies[0]);
+            self::assertSame('PUT', $http->requests[1]->getMethod());
+            self::assertSame('upload.example', $http->requests[1]->getUri()->getHost());
+            $insertBody = json_decode($http->bodies[2], true);
+            self::assertSame('INSERT INTO t VALUES', $insertBody['sql']);
+            self::assertStringStartsWith('~/load/', ltrim($insertBody['stage_attachment']['location'], '@'));
+        } finally {
+            @unlink($file);
+        }
+    }
+
+    public function testLoadFileWithApiStageUpload(): void
+    {
+        $file = tempnam(sys_get_temp_dir(), 'lake-load-');
+        file_put_contents($file, "1,a\n");
+        try {
+            $http = new MockHttpClient([
+                new Response(200, [], ''),
+                // Real stage-attachment INSERTs return no result schema;
+                // the count is only reported through stats.write_progress.
+                $this->jsonResponse([
+                    'id' => 'q-insert-api-stage',
+                    'schema' => [],
+                    'data' => [],
+                    'state' => 'Succeeded',
+                    'stats' => ['write_progress' => ['rows' => 1, 'bytes' => 10]],
+                    'next_uri' => '',
+                ]),
+            ]);
+
+            $config = Config::fromDsn('lake://u:p@localhost/db?sslmode=disable&login=disable&presigned_url_disabled=true');
+            $affected = (new Client($config, $http))->connect()->loadFile('INSERT INTO t VALUES', $file);
+
+            self::assertSame(1, $affected);
+            self::assertSame('/v1/upload_to_stage', $http->requests[0]->getUri()->getPath());
+            self::assertSame('~', $http->requests[0]->getHeaderLine('stage_name'));
+        } finally {
+            @unlink($file);
+        }
     }
 }

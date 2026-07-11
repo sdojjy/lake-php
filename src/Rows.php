@@ -100,7 +100,13 @@ final class Rows implements \Iterator
     public function valid(): bool
     {
         while ($this->pos >= count($this->rows) && !$this->response->readFinished()) {
-            $next = $this->client->pollQuery($this->response->nextUri);
+            try {
+                $next = $this->client->pollQuery($this->response->nextUri);
+            } catch (\Throwable $e) {
+                $this->client->closeQuery($this->response);
+                $this->closed = true;
+                throw $e;
+            }
             // Later pages may omit final/kill URIs; keep the known ones.
             if ($next->finalUri === '') {
                 $next->finalUri = $this->response->finalUri;
