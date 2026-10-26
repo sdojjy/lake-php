@@ -5,11 +5,13 @@ declare(strict_types=1);
 namespace TiDBCloud\Lake\Tests\Laravel;
 
 use Carbon\Carbon;
+use GuzzleHttp\Exception\RequestException;
 use Illuminate\Database\ConnectionResolver;
 use Illuminate\Database\DatabaseTransactionsManager;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Query\Builder;
 use PHPUnit\Framework\TestCase;
+use Psr\Http\Message\RequestInterface;
 use TiDBCloud\Lake\Exception\UnsupportedFeatureException;
 use TiDBCloud\Lake\Laravel\LakeConnection;
 use TiDBCloud\Lake\Laravel\LakeQueryBuilder;
@@ -506,6 +508,30 @@ final class LakeConnectionTest extends TestCase
 
         self::assertSame(['BEGIN', 'ROLLBACK'], $this->lake->sqls());
         self::assertSame(0, $this->connection->transactionLevel());
+    }
+
+    public function testLaravelDoesNotRerunAWriteThatMayHaveRun(): void
+    {
+        // The connection drops after the INSERT was sent (cURL error 56).
+        $this->lake->http->push(static fn (RequestInterface $request) => throw new RequestException(
+            'cURL error 56: Recv failure: Connection reset by peer',
+            $request,
+            null,
+            null,
+            ['request_size' => 312],
+        ));
+        $this->lake->dml(['number of rows inserted' => 1]);
+        // Laravel re-runs a query after an error that looks like a lost connection.
+        $this->connection->setReconnector(fn (LakeConnection $connection) => $connection->setPdo($this->lake->pdo()));
+
+        try {
+            $this->connection->insert('insert into t values (?)', [7]);
+            self::fail('expected QueryException');
+        } catch (\Illuminate\Database\QueryException $e) {
+            self::assertStringContainsString('may or may not have run', $e->getMessage());
+        }
+
+        self::assertSame(['insert into t values (7)'], $this->lake->sqls());
     }
 
     public function testQueryErrorsBecomeLaravelQueryExceptions(): void

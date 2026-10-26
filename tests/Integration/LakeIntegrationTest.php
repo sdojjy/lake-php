@@ -5,9 +5,12 @@ declare(strict_types=1);
 namespace TiDBCloud\Lake\Tests\Integration;
 
 use PHPUnit\Framework\TestCase;
+use Psr\Http\Client\ClientInterface;
 use TiDBCloud\Lake\Client;
 use TiDBCloud\Lake\Connection;
 use TiDBCloud\Lake\Exception\QueryException;
+use TiDBCloud\Lake\Exception\QueryOutcomeUnknownException;
+use TiDBCloud\Lake\Tests\Support\ResponseLossInjector;
 
 /**
  * Live integration tests. Gated by the LAKE_DSN environment variable and
@@ -18,14 +21,40 @@ use TiDBCloud\Lake\Exception\QueryException;
  */
 final class LakeIntegrationTest extends TestCase
 {
-    private function connect(): Connection
+    private function connect(?ClientInterface $http = null): Connection
     {
         $dsn = getenv('LAKE_DSN');
         if ($dsn === false || $dsn === '') {
             self::markTestSkipped('LAKE_DSN is not set');
         }
 
-        return Client::fromDsn($dsn)->connect();
+        return Client::fromDsn($dsn, $http)->connect();
+    }
+
+    public function testStatementWhoseResponseIsLostIsSentOnceUnlessItOnlyReads(): void
+    {
+        $injector = new ResponseLossInjector();
+        $conn = $this->connect($injector);
+        $table = 'lake_php_it_lost_' . bin2hex(random_bytes(4));
+        $conn->execute("CREATE TABLE {$table} (id INT)");
+
+        try {
+            // The server runs the INSERT, then the response is lost.
+            $injector->loseResponseTo("INSERT INTO {$table}");
+            try {
+                $conn->execute("INSERT INTO {$table} VALUES (7)");
+                self::fail('expected QueryOutcomeUnknownException');
+            } catch (QueryOutcomeUnknownException) {
+            }
+            self::assertSame(1, $injector->timesSent("INSERT INTO {$table}"));
+
+            // A read is sent again instead, and sees the single row.
+            $injector->loseResponseTo('SELECT count(*)');
+            self::assertSame(1, $conn->queryRow("SELECT count(*) AS n FROM {$table}")['n']);
+            self::assertSame(2, $injector->timesSent('SELECT count(*)'));
+        } finally {
+            $conn->execute("DROP TABLE IF EXISTS {$table}");
+        }
     }
 
     public function testVerifyAndVersion(): void

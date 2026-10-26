@@ -4,9 +4,12 @@ declare(strict_types=1);
 
 namespace TiDBCloud\Lake\Tests\Pdo;
 
+use GuzzleHttp\Exception\RequestException;
 use PHPUnit\Framework\TestCase;
+use Psr\Http\Message\RequestInterface;
 use TiDBCloud\Lake\Client;
 use TiDBCloud\Lake\Exception\QueryException;
+use TiDBCloud\Lake\Exception\QueryOutcomeUnknownException;
 use TiDBCloud\Lake\Pdo\LakePdo;
 use TiDBCloud\Lake\Pdo\LakePdoStatement;
 use TiDBCloud\Lake\Tests\Support\FakeLake;
@@ -271,6 +274,36 @@ final class LakePdoTest extends TestCase
         );
     }
 
+    public function testStatementThatMayHaveRunMakesTheTransactionRollbackOnly(): void
+    {
+        $this->lake->ok();
+        $this->lake->http->push(static fn (RequestInterface $request) => throw new RequestException(
+            'cURL error 56: Recv failure: Connection reset by peer',
+            $request,
+            null,
+            null,
+            ['request_size' => 312],
+        ));
+        $this->lake->ok();
+        $pdo = $this->lake->pdo();
+
+        $pdo->beginTransaction();
+        try {
+            $pdo->exec('insert into t values (1)');
+            self::fail('expected PDOException');
+        } catch (\PDOException $e) {
+            self::assertInstanceOf(QueryOutcomeUnknownException::class, $e->getPrevious());
+        }
+        try {
+            $pdo->commit();
+            self::fail('expected PDOException');
+        } catch (\PDOException $e) {
+            self::assertStringContainsString('may or may not have run', $e->getMessage());
+        }
+
+        self::assertSame(['BEGIN', 'insert into t values (1)', 'ROLLBACK'], $this->lake->sqls());
+    }
+
     public function testCommitFailsWhenTheServerReportsTheTransactionAborted(): void
     {
         $this->lake->ok();
@@ -338,6 +371,17 @@ final class LakePdoTest extends TestCase
 
         self::assertInstanceOf(LakePdoStatement::class, $statement);
         self::assertSame('select 42', $statement->sql());
+        // Read by debug tools such as Debugbar and Telescope.
+        self::assertSame('select 42', $statement->queryString);
+    }
+
+    public function testQueryStringIsReadOnlyLikePdo(): void
+    {
+        $statement = $this->lake->pdo()->prepare('select 42');
+
+        $this->expectException(\Error::class);
+        $this->expectExceptionMessage('read only');
+        $statement->queryString = 'select 1';
     }
 
     public function testFromDsnWrapsConnectionErrors(): void

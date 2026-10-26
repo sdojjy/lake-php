@@ -305,6 +305,15 @@ back and throws instead of reporting success.
 - Incomplete results are paged with `GET <next_uri>`; `final_uri` is called
   when the result is fully read or `Rows::close()` is invoked; `kill_uri`
   is available via `Client::killQuery()`.
+- Requests that fail in transit are retried, except a statement that may
+  already have run: a timeout or a dropped connection can come after the
+  server received it. Such a `POST /v1/query` is sent again only if the
+  request provably never left (Guzzle's cURL handler reports no bytes sent)
+  or the statement only reads (`SELECT`, `SHOW`, `DESC`, `PRESIGN`).
+  Otherwise `QueryOutcomeUnknownException` is thrown (in Laravel, a
+  `QueryException` saying the statement "may or may not have run"): check
+  its effect before running it again. Inside a transaction, the
+  transaction can then only be rolled back.
 - Headers sent on every request: `Authorization` (Basic or Bearer),
   `X-DATABEND-TENANT`, `X-DATABEND-WAREHOUSE`, `X-DATABEND-QUERY-ID`,
   `X-DATABEND-ROUTE: warehouse`, `X-DATABEND-ROUTE-HINT`, and

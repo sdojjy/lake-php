@@ -11,10 +11,13 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Database\QueryException;
 use PHPUnit\Framework\TestCase;
+use TiDBCloud\Lake\Client;
 use TiDBCloud\Lake\Config;
 use TiDBCloud\Lake\Exception\LakeException;
 use TiDBCloud\Lake\Laravel\LakeConnection;
 use TiDBCloud\Lake\Laravel\LakeServiceProvider;
+use TiDBCloud\Lake\Pdo\LakePdo;
+use TiDBCloud\Lake\Tests\Support\ResponseLossInjector;
 
 /**
  * Live tests of the Laravel driver: Eloquent and the query builder against a
@@ -294,6 +297,25 @@ final class LaravelIntegrationTest extends TestCase
             date_default_timezone_set($appTimezone);
             $db->disconnect();
         }
+    }
+
+    public function testEloquentWriteWhoseResponseIsLostIsNotRunAgain(): void
+    {
+        $injector = new ResponseLossInjector();
+        $this->db->setPdo(new LakePdo(Client::fromDsn($this->dsn, $injector)->connect()));
+        $injector->loseResponseTo('insert into');
+
+        try {
+            AttributionLog::create(['id' => 1, 'user_id' => 1]);
+            self::fail('expected QueryException');
+        } catch (QueryException $e) {
+            self::assertStringContainsString('may or may not have run', $e->getMessage());
+        }
+
+        // The server ran it once: neither lake-php's retry nor Laravel's
+        // reconnect-and-retry after a lost connection sent it again.
+        self::assertSame(1, $injector->timesSent('insert into'));
+        self::assertSame(1, AttributionLog::count());
     }
 
     public function testUpsertUsesMerge(): void

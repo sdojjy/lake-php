@@ -47,16 +47,18 @@ final class LakePdoStatement extends \PDOStatement
 
     public function __construct(
         private readonly LakePdo $pdo,
-        private readonly string $sql,
+        string $sql,
     ) {
-        // parent::__construct() does not exist; PDOStatement::$queryString
-        // is read-only, so the SQL is kept in our own property.
+        // parent::__construct() does not exist, so PDOStatement::$queryString
+        // must be set here: reading it uninitialized is a fatal error. As
+        // with PDO, it cannot be written again afterwards.
+        $this->queryString = $sql;
         $this->fetchMode = (int) $pdo->getAttribute(\PDO::ATTR_DEFAULT_FETCH_MODE);
     }
 
     public function sql(): string
     {
-        return $this->sql;
+        return $this->queryString;
     }
 
     public function bindValue(int|string $param, mixed $value, int $type = \PDO::PARAM_STR): bool
@@ -103,7 +105,7 @@ final class LakePdoStatement extends \PDOStatement
             $values[$key] = self::coerce($reference[0], $reference[1]);
         }
 
-        $this->load($this->pdo->run($this->sql, self::sqlParams($values)));
+        $this->load($this->pdo->run($this->queryString, self::sqlParams($values)));
 
         return true;
     }
@@ -240,7 +242,7 @@ final class LakePdoStatement extends \PDOStatement
 
     public function debugDumpParams(): ?bool
     {
-        echo 'SQL: [', strlen($this->sql), '] ', $this->sql, PHP_EOL;
+        echo 'SQL: [', strlen($this->queryString), '] ', $this->queryString, PHP_EOL;
 
         return null;
     }

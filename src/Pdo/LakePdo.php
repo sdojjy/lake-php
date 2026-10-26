@@ -9,6 +9,7 @@ use TiDBCloud\Lake\Connection;
 use TiDBCloud\Lake\Exception\ApiException;
 use TiDBCloud\Lake\Exception\LakeException;
 use TiDBCloud\Lake\Exception\QueryException;
+use TiDBCloud\Lake\Exception\QueryOutcomeUnknownException;
 use TiDBCloud\Lake\QueryResponse;
 use TiDBCloud\Lake\SqlEncoder;
 
@@ -39,6 +40,7 @@ final class LakePdo extends \PDO
     ];
 
     private const ABORTED = 'A statement in this transaction failed, which aborts the transaction on TiDB Cloud Lake.';
+    private const OUTCOME_UNKNOWN = 'A statement in this transaction may or may not have run: the connection failed after it was sent.';
 
     /** Why the open transaction can no longer commit, see {@see setRollbackOnly()}. */
     private ?string $rollbackOnly = null;
@@ -116,6 +118,8 @@ final class LakePdo extends \PDO
             // unknown table, a syntax error), so this cannot rely on it.
             if ($e->getPrevious() instanceof QueryException) {
                 $this->setRollbackOnly(self::ABORTED);
+            } elseif ($e->getPrevious() instanceof QueryOutcomeUnknownException) {
+                $this->setRollbackOnly(self::OUTCOME_UNKNOWN);
             }
 
             throw $e;
