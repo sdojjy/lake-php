@@ -83,4 +83,44 @@ final class QueryResponse
     {
         return $this->typedRows !== [] ? count($this->typedRows) : count($this->data);
     }
+
+    /**
+     * Whether the result is a DML summary ("number of rows inserted",
+     * "number of rows updated", ...) rather than a regular result set.
+     */
+    public function isDmlSummary(): bool
+    {
+        return $this->schema !== [] && str_contains($this->schema[0]['name'], 'number of rows');
+    }
+
+    /**
+     * Number of rows affected by a fully-read DML response.
+     *
+     * INSERT/UPDATE/DELETE responses report the count through "number of
+     * rows ..." columns, mirroring lake-go's parseAffectedRows; MERGE reports
+     * one column per action (inserted, updated, deleted), which are summed.
+     * Stage-attachment INSERTs return no result schema at all; there the
+     * count is only available via stats.write_progress.
+     */
+    public function affectedRows(): int
+    {
+        if ($this->isDmlSummary()) {
+            $total = 0;
+            foreach ($this->schema as $i => $field) {
+                if (!str_contains($field['name'], 'number of rows')) {
+                    continue;
+                }
+                $value = $this->typedRows[0][$i] ?? null;
+                if (is_int($value) || (is_string($value) && is_numeric($value))) {
+                    $total += (int) $value;
+                }
+            }
+
+            return $total;
+        }
+
+        $written = $this->stats['write_progress']['rows'] ?? null;
+
+        return is_numeric($written) ? (int) $written : 0;
+    }
 }

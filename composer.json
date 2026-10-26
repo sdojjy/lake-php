@@ -3,7 +3,16 @@
     "description": "PHP driver for TiDB Cloud Lake (HTTP API)",
     "type": "library",
     "license": "Apache-2.0",
-    "keywords": ["tidbcloud", "lake", "database", "driver", "sql"],
+    "keywords": [
+        "tidbcloud",
+        "lake",
+        "database",
+        "driver",
+        "sql",
+        "laravel",
+        "eloquent",
+        "pdo"
+    ],
     "require": {
         "php": ">=8.1",
         "ext-json": "*",
@@ -13,7 +22,16 @@
         "guzzlehttp/guzzle": "^7.5"
     },
     "require-dev": {
+        "illuminate/database": "^9.52 || ^10.0 || ^11.0 || ^12.0",
+        "illuminate/pagination": "^9.52 || ^10.0 || ^11.0 || ^12.0",
         "phpunit/phpunit": "^10.5"
+    },
+    "conflict": {
+        "illuminate/database": "<9.52 || >=13.0"
+    },
+    "suggest": {
+        "ext-pdo": "Required for the PDO adapter (TiDBCloud\\Lake\\Pdo) and the Laravel driver",
+        "illuminate/database": "Required to use the Laravel / Eloquent \"lake\" database driver (Laravel 9-12)"
     },
     "autoload": {
         "psr-4": {
@@ -27,6 +45,13 @@
     },
     "scripts": {
         "test": "phpunit"
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "TiDBCloud\\Lake\\Laravel\\LakeServiceProvider"
+            ]
+        }
     },
     "config": {
         "sort-packages": true

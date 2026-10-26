@@ -72,6 +72,32 @@ final class QueryResponseTest extends TestCase
         self::assertSame('syntax error', $resp->error['message']);
     }
 
+    public function testAffectedRowsSumsDmlSummaryColumns(): void
+    {
+        $resp = QueryResponse::fromArray([
+            'schema' => [
+                ['name' => 'number of rows inserted', 'type' => 'UInt64'],
+                ['name' => 'number of rows updated', 'type' => 'UInt64'],
+            ],
+        ]);
+        $resp->typedRows = [[2, 3]];
+
+        self::assertTrue($resp->isDmlSummary());
+        self::assertSame(5, $resp->affectedRows());
+    }
+
+    public function testAffectedRowsFallsBackToWriteProgress(): void
+    {
+        $resp = QueryResponse::fromArray(['stats' => ['write_progress' => ['rows' => 4, 'bytes' => 64]]]);
+
+        self::assertFalse($resp->isDmlSummary());
+        self::assertSame(4, $resp->affectedRows());
+
+        $select = QueryResponse::fromArray(['schema' => [['name' => 'id', 'type' => 'Int32']]]);
+        self::assertFalse($select->isDmlSummary());
+        self::assertSame(0, $select->affectedRows());
+    }
+
     public function testEmptyBody(): void
     {
         $resp = QueryResponse::fromArray([]);

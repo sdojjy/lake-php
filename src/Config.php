@@ -42,7 +42,11 @@ final class Config
     public int $maxRowsInBuffer = 0;
     public int $maxRowsPerPage = 0;
 
-    /** IANA timezone name used to interpret Timestamp values (alias: location). */
+    /**
+     * IANA timezone name (alias: location). Sent as the session's "timezone"
+     * setting, and used to interpret Timestamp values when a response does
+     * not report its timezone.
+     */
     public string $timezone = 'UTC';
 
     /** "disable" to use plain HTTP; anything else means HTTPS. */

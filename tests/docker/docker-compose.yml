@@ -1,6 +1,9 @@
 services:
   minio:
-    image: docker.io/minio/minio
+    # docker.io/minio/minio is no longer published; Chainguard ships the same
+    # server. Runs as root so it can write the bind-mounted data directory.
+    image: cgr.dev/chainguard/minio:latest
+    user: root
     command: server /data
     volumes:
       - ./data:/data

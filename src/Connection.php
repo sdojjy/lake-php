@@ -24,12 +24,21 @@ final class Connection
      */
     public function execute(string $sql, array|object|null $params = null): int
     {
+        return $this->run($sql, $params)->affectedRows();
+    }
+
+    /**
+     * Runs a statement to completion and returns the fully-read response:
+     * schema, all typed rows across pages, and stats.
+     */
+    public function run(string $sql, array|object|null $params = null): QueryResponse
+    {
         $sql = SqlEncoder::interpolate($sql, $params);
         $response = $this->client->startQuery($sql);
         try {
             $response = $this->client->waitForResults($response);
 
-            return self::affectedRows($response);
+            return $response;
         } finally {
             $this->client->closeQuery($response);
         }
@@ -131,6 +140,23 @@ final class Connection
     }
 
     /**
+     * Whether a transaction is open, as reported by the server; also
+     * reflects BEGIN/COMMIT/ROLLBACK sent as plain statements.
+     */
+    public function inTransaction(): bool
+    {
+        return $this->client->inTransaction();
+    }
+
+    /**
+     * The server-reported transaction state, see {@see Client::transactionState()}.
+     */
+    public function transactionState(): string
+    {
+        return $this->client->transactionState();
+    }
+
+    /**
      * Executes a callback inside a transaction.
      *
      * @template T
@@ -170,9 +196,10 @@ final class Connection
     ): int {
         $stagePath = sprintf('load/%d-%s-%s', time(), bin2hex(random_bytes(4)), basename($file));
         $this->client->uploadToStage('~', $stagePath, $file);
-        $response = $this->client->insertWithStage($sql, '~', $stagePath, $fileFormatOptions, $copyOptions);
 
-        return self::affectedRows($response);
+        return $this->client
+            ->insertWithStage($sql, '~', $stagePath, $fileFormatOptions, $copyOptions)
+            ->affectedRows();
     }
 
     /**
@@ -204,31 +231,6 @@ final class Connection
         }
 
         return $this->streamLoad($sql, $rows);
-    }
-
-    /**
-     * INSERT/UPDATE/DELETE responses report the count through a
-     * "number of rows ..." column, mirroring lake-go's parseAffectedRows.
-     * Stage-attachment INSERTs return no result schema at all; there the
-     * count is only available via stats.write_progress.
-     */
-    private static function affectedRows(QueryResponse $response): int
-    {
-        if ($response->schema !== [] && str_contains($response->schema[0]['name'], 'number of rows')) {
-            $value = $response->typedRows[0][0] ?? null;
-            if (is_int($value)) {
-                return $value;
-            }
-            if (is_string($value) && is_numeric($value)) {
-                return (int) $value;
-            }
-
-            return 0;
-        }
-
-        $written = $response->stats['write_progress']['rows'] ?? null;
-
-        return is_numeric($written) ? (int) $written : 0;
     }
 
     /**

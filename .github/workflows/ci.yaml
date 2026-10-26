@@ -11,13 +11,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php-version:
-          - "8.1"
-          - "8.2"
-          - "8.3"
-          - "8.4"
+        include:
+          - { php-version: "8.1", laravel: "9.*" }
+          - { php-version: "8.2", laravel: "9.*" }
+          - { php-version: "8.2", laravel: "10.*" }
+          - { php-version: "8.3", laravel: "11.*" }
+          - { php-version: "8.4", laravel: "12.*" }
     runs-on: ubuntu-latest
-    name: PHP ${{ matrix.php-version }} unit tests
+    name: PHP ${{ matrix.php-version }} / Laravel ${{ matrix.laravel }} unit tests
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,12 +42,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ steps.composer-cache.outputs.dir }}
-          key: composer-${{ runner.os }}-php${{ matrix.php-version }}-${{ hashFiles('composer.json') }}
+          key: composer-${{ runner.os }}-php${{ matrix.php-version }}-laravel${{ matrix.laravel }}-${{ hashFiles('composer.json') }}
           restore-keys: |
-            composer-${{ runner.os }}-php${{ matrix.php-version }}-
+            composer-${{ runner.os }}-php${{ matrix.php-version }}-laravel${{ matrix.laravel }}-
 
       - name: Install dependencies
-        run: composer install --no-interaction --no-progress --prefer-dist
+        run: composer update --no-interaction --no-progress --prefer-dist --with "illuminate/database:${{ matrix.laravel }}"
 
       - name: Lint sources
         run: |
@@ -57,11 +58,15 @@ jobs:
         run: composer test
 
   integration:
+    strategy:
+      fail-fast: false
+      matrix:
+        laravel: ["9.*", "12.*"]
     runs-on: ubuntu-latest
-    name: Integration tests (dockerized Lake server)
+    name: Integration tests (dockerized Lake server, Laravel ${{ matrix.laravel }})
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Run integration tests
-        run: make integration
+        run: make integration IT_LARAVEL='${{ matrix.laravel }}'

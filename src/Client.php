@@ -5,15 +5,18 @@ declare(strict_types=1);
 namespace TiDBCloud\Lake;
 
 use GuzzleHttp\Client as GuzzleClient;
+use GuzzleHttp\Exception\ConnectException;
+use GuzzleHttp\Exception\RequestException;
 use GuzzleHttp\Psr7\HttpFactory;
+use Psr\Http\Client\ClientExceptionInterface;
 use Psr\Http\Client\ClientInterface as PsrClientInterface;
-use Psr\Http\Client\NetworkExceptionInterface;
 use Psr\Http\Message\RequestFactoryInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\StreamFactoryInterface;
 use TiDBCloud\Lake\Exception\ApiException;
 use TiDBCloud\Lake\Exception\LakeException;
 use TiDBCloud\Lake\Exception\QueryException;
+use TiDBCloud\Lake\Exception\QueryOutcomeUnknownException;
 
 /**
  * Low-level HTTP client for the Lake HTTP API,
@@ -122,6 +125,30 @@ final class Client
     }
 
     /**
+     * The session's transaction state as last reported by the server
+     * (session.txn_state): "AutoCommit", "Active" or "Fail" (aborted by a
+     * failed statement); '' until the server reports one.
+     *
+     * The server reports "Fail" only for errors raised while executing a
+     * statement; one rejected while parsing or planning (e.g. an unknown
+     * table) also aborts the transaction but leaves it "Active".
+     */
+    public function transactionState(): string
+    {
+        return (string) ($this->sessionValue('txn_state') ?? '');
+    }
+
+    /**
+     * Whether the session has an open explicit transaction, as last
+     * reported by the server. An aborted ("Fail") transaction stays open
+     * until COMMIT or ROLLBACK.
+     */
+    public function inTransaction(): bool
+    {
+        return in_array($this->transactionState(), ['Active', 'Fail'], true);
+    }
+
+    /**
      * POST /v1/session/login. Saves the X-DATABEND-SESSION-ID response
      * header and marks the session as logged in.
      */
@@ -161,8 +188,8 @@ final class Client
         }
         try {
             $this->doRequest('POST', '/v1/session/logout', [], $this->needSticky());
-        } catch (LakeException) {
-            // best effort
+        } catch (LakeException | ClientExceptionInterface) {
+            // best effort, network errors included
         }
         $this->loggedIn = false;
     }
@@ -285,6 +312,7 @@ final class Client
             fn (): array => $this->doRequest('POST', '/v1/query', $body, $this->needSticky()),
             attempts: 5,
             delaySeconds: 2.0,
+            sql: (string) ($requestBody['sql'] ?? ''),
         );
 
         return $this->finalizeResponse($data, $response, $raw);
@@ -313,6 +341,9 @@ final class Client
         while (!$response->readFinished()) {
             $next = $this->pollQuery($response->nextUri);
             $next->typedRows = array_merge($response->typedRows, $next->typedRows);
+            if ($next->schema === []) {
+                $next->schema = $response->schema;
+            }
             if ($next->finalUri === '') {
                 $next->finalUri = $response->finalUri;
             }
@@ -335,8 +366,8 @@ final class Client
         }
         try {
             $this->doRequest('GET', $response->finalUri, null, true);
-        } catch (LakeException) {
-            // best effort
+        } catch (LakeException | ClientExceptionInterface) {
+            // best effort, network errors included
         }
     }
 
@@ -350,8 +381,8 @@ final class Client
         }
         try {
             $this->doRequest('GET', $response->killUri, null, true);
-        } catch (LakeException) {
-            // best effort
+        } catch (LakeException | ClientExceptionInterface) {
+            // best effort, network errors included
         }
     }
 
@@ -569,25 +600,55 @@ final class Client
     }
 
     /**
-     * Retries on PSR-18 network failures only; HTTP-level errors surface
-     * immediately as ApiException.
+     * Retries requests that failed in transit (any PSR-18 client exception:
+     * Guzzle reports a dropped connection after sending as RequestException);
+     * HTTP-level errors surface immediately as ApiException. The request of
+     * a statement ($sql) is only sent again when {@see canResend()} allows
+     * it; otherwise QueryOutcomeUnknownException says it may have run.
      *
      * @template T
      * @param callable(): T $fn
      * @return T
      */
-    private function withRetry(callable $fn, int $attempts, float $delaySeconds): mixed
+    private function withRetry(callable $fn, int $attempts, float $delaySeconds, ?string $sql = null): mixed
     {
         for ($attempt = 1; ; $attempt++) {
             try {
                 return $fn();
-            } catch (NetworkExceptionInterface $e) {
+            } catch (ClientExceptionInterface $e) {
+                if ($sql !== null && !self::canResend($sql, $e)) {
+                    throw new QueryOutcomeUnknownException($e);
+                }
                 if ($attempt >= $attempts) {
                     throw new LakeException('http request failed: ' . $e->getMessage(), 0, $e);
                 }
                 usleep((int) ($delaySeconds * 1_000_000));
             }
         }
+    }
+
+    /**
+     * Whether a statement whose request failed in transit may be sent again:
+     * when the request provably never left (cURL sent no bytes), or when the
+     * statement only reads, so running it twice is harmless. Otherwise it may
+     * have run on the server already: a timeout or a dropped connection can
+     * come after the server received it.
+     *
+     * @internal exposed for tests
+     */
+    public static function canResend(string $sql, ClientExceptionInterface $e): bool
+    {
+        // Guzzle's cURL handler reports what was sent; other clients do not.
+        if ($e instanceof ConnectException || $e instanceof RequestException) {
+            if (($e->getHandlerContext()['request_size'] ?? null) === 0) {
+                return true;
+            }
+        }
+
+        // Leading whitespace, comments and parentheses are skipped.
+        $sql = (string) preg_replace('~^(?:\s+|--[^\n]*|/\*.*?\*/|\()+~s', '', $sql);
+
+        return preg_match('/^(?:SELECT|SHOW|DESC|DESCRIBE|PRESIGN)\b/i', $sql) === 1;
     }
 
     private function cookieHeader(): string

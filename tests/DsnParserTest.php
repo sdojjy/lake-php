@@ -67,9 +67,11 @@ final class DsnParserTest extends TestCase
     {
         $cfg = Config::fromDsn('lake://u:p@h/db?location=Asia/Shanghai');
         self::assertSame('Asia/Shanghai', $cfg->timezone);
+        self::assertSame(['timezone' => 'Asia/Shanghai'], $cfg->params);
 
         $cfg = Config::fromDsn('lake://u:p@h/db?timezone=UTC');
         self::assertSame('UTC', $cfg->timezone);
+        self::assertSame(['timezone' => 'UTC'], $cfg->params);
     }
 
     public function testLocationTimezoneConflict(): void

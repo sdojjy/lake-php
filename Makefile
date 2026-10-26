@@ -1,5 +1,8 @@
 COMPOSE := docker compose -f tests/docker/docker-compose.yml -p lake-php-it
 IT_DSN ?= http://root:@query:8000/default?sslmode=disable
+# Laravel version for the integration run, e.g. IT_LARAVEL='9.*' (default: latest).
+IT_LARAVEL ?=
+IT_COMPOSER := $(if $(IT_LARAVEL),composer update --no-interaction --quiet --with "illuminate/database:$(IT_LARAVEL)",composer install --no-interaction --quiet)
 
 test:
 	composer install --no-interaction
@@ -20,7 +23,7 @@ integration: integration-up
 	docker run --rm --network lake-php-it_default \
 		-v "$(CURDIR)":/app -w /app \
 		-e LAKE_DSN="$(IT_DSN)" \
-		composer:2 sh -c "composer install --no-interaction --quiet && ./vendor/bin/phpunit --group integration"; \
+		composer:2 sh -c '$(IT_COMPOSER) && ./vendor/bin/phpunit --group integration'; \
 	status=$$?; \
 	$(COMPOSE) down -v; \
 	exit $$status

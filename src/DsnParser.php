@@ -105,6 +105,9 @@ final class DsnParser
                         throw new LakeException('invalid timezone: ' . $value, 0, $e);
                     }
                     $cfg->timezone = $value;
+                    // Also the session timezone, as in lake-go, so the server
+                    // reads and returns timestamps (and now()) in it.
+                    $cfg->params['timezone'] = $value;
                     break;
                 case 'tenant':
                     $cfg->tenant = $value;

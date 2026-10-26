@@ -58,7 +58,7 @@ Supported parameters:
 | `wait_time_secs` | Pagination: max wait per HTTP request |
 | `max_rows_in_buffer` | Pagination: server-side row buffer |
 | `max_rows_per_page` | Pagination: max rows per response page |
-| `location` / `timezone` | IANA timezone for `Timestamp` values (aliases) |
+| `location` / `timezone` | IANA session timezone (aliases): the server reads and returns `Timestamp` values, and evaluates `now()`, in it |
 | `sslmode` | `disable` for plain HTTP |
 | `login` | `disable` to skip `POST /v1/session/login` |
 | `empty_field_as` | Empty-CSV-field handling (stage upload, phase 2) |
@@ -184,38 +184,115 @@ $client = new Client(
 );
 ```
 
-### Using with Laravel (no Laravel dependency required)
+## Laravel / Eloquent
 
-Register the connection as a singleton in a service provider:
+lake-php ships a `lake` database driver for **Laravel 9, 10, 11 and 12**:
+Eloquent models and the query builder read and write Lake without code
+changes. It needs PHP >= 8.1, also on Laravel 9. The driver relies on
+version-specific Laravel internals, so Composer refuses to install lake-php
+next to other `illuminate/database` versions.
 
-```php
-// app/Providers/AppServiceProvider.php
-use TiDBCloud\Lake\Client;
-use TiDBCloud\Lake\Connection;
-
-public function register(): void
-{
-    $this->app->singleton(Connection::class, function () {
-        return Client::fromDsn(config('services.lake.dsn'))->connect();
-    });
-}
+```bash
+composer require sdojjy/lake-php
 ```
 
+The service provider (`TiDBCloud\Lake\Laravel\LakeServiceProvider`) is
+auto-discovered. Add a connection in `config/database.php`:
+
 ```php
-// config/services.php
-'lake' => [
-    'dsn' => env('LAKE_DSN', 'lake://user:pass@lake.tidbcloud.com:443/default?warehouse=wh'),
+'connections' => [
+    'lake' => [
+        'driver' => 'lake',
+        'host' => env('LAKE_HOST', 'lake.tidbcloud.com'),
+        'port' => env('LAKE_PORT', 443),
+        'database' => env('LAKE_DATABASE', 'default'),
+        'username' => env('LAKE_USERNAME'),
+        'password' => env('LAKE_PASSWORD'),
+        'warehouse' => env('LAKE_WAREHOUSE'),
+        // Lake's session timezone: keep it equal to the app's (see "Dates" below).
+        'timezone' => config('app.timezone'),
+        'prefix' => '',
+        // Optional: any DSN parameter (tenant, role, access_token, timeout,
+        // sslmode, ...), extra session settings, and the sequences used for
+        // generated keys (see below).
+        // 'settings' => ['binary_output_format' => 'hex'],
+        // 'sequences' => ['user_link_attribution_logs' => 'user_link_attribution_logs_id_seq'],
+    ],
 ],
 ```
 
-Then type-hint `TiDBCloud\Lake\Connection` anywhere:
+Instead of the individual keys you can pass a full DSN as `'dsn' =>
+env('LAKE_DSN')`; the other keys, `timezone` included, then belong in the DSN.
+Keep `'database'` set as well, because Laravel reads it. A `url` with a
+`lake://` scheme also works.
+
+To move an existing app over without touching its code, point the connection
+its models already use at the `lake` driver (or set `DB_CONNECTION=lake`).
+Queries then run on Lake unchanged:
 
 ```php
-public function index(Connection $lake)
-{
-    return $lake->queryAll('SELECT * FROM books LIMIT ?', [20]);
-}
+UserLinkAttributionLog::query()
+    ->whereKey(1)
+    ->where('created_at', '<', '2026-01-01')
+    ->first();
+
+DB::connection('lake')->table('books')->where('price', '>', 10)->paginate(20);
+DB::connection('lake')->transaction(fn () => Book::create(['id' => 1, 'title' => 'Dune']));
 ```
+
+`LakeConnection` runs Laravel's own query code through
+`TiDBCloud\Lake\Pdo\LakePdo`, a PDO-compatible adapter (see below). The SQL
+comes from Laravel's MySQL grammar, since Lake accepts backtick identifiers,
+with these Lake-specific differences:
+
+| Feature | Behavior on Lake |
+|---|---|
+| Generated keys | Lake has no `LAST_INSERT_ID()`. For `create()` / `save()` / `insertGetId()` on auto-incrementing models, a key you supply is used. Otherwise, if `sequences` maps the table to a Lake sequence (`CREATE SEQUENCE ...`), the driver takes `NEXTVAL()` and inserts with it. Otherwise it throws `UnsupportedFeatureException` before writing. Alternatively set `$incrementing = false` on the model. |
+| `upsert()` | Compiled to `MERGE INTO`. Matched rows only get the given update columns (MySQL semantics). The return value is inserted + updated rows. |
+| Transactions | `BEGIN` / `COMMIT` / `ROLLBACK`. Lake has no savepoints, so a nested `transaction()` joins the outer one. If a nested transaction rolls back, Lake cannot undo only its part, so the whole transaction is rolled back instead: later statements in it fail, and committing the outer transaction rolls back and throws a `PDOException`, dropping its `afterCommit` callbacks (on MySQL, only the nested part would be undone). Likewise, a statement that fails inside a transaction aborts it on Lake, so committing it afterwards throws instead of silently rolling back. |
+| Eager loading with `limit()` (Laravel 11+) | Compiled with `row_number() over (partition by ...)`. |
+| `whereTime()` | Compiled to `date_format(col, '%H:%M:%S')`. Lake has no `TIME()`. |
+| Dates | Read back as `'Y-m-d'` / `'Y-m-d H:i:s[.u]'` strings like pdo_mysql, in the Lake session timezone (the connection's `timezone`, UTC by default). Laravel writes wall-clock values in `app.timezone`. They round-trip unchanged either way, but SQL evaluated on the server (`DB::raw('now()')`, `today()`, `date_trunc(...)`, retention jobs) is off by the app's UTC offset unless `timezone` matches `app.timezone`. |
+| `cursor()` / `lazy()` | The result is buffered client-side, like pdo_mysql's default buffered mode. |
+| Not supported | Schema builder and migrations (manage Lake tables with SQL), `insertOrIgnore()`, `lockForUpdate()` / `sharedLock()`, MySQL JSON operations (`col->key`, `whereJsonContains()`, ...). These throw `TiDBCloud\Lake\Exception\UnsupportedFeatureException` before anything is sent. |
+
+Outside a Laravel app (`Illuminate\Database\Capsule\Manager`), register the
+driver yourself:
+
+```php
+$capsule = new Illuminate\Database\Capsule\Manager();
+TiDBCloud\Lake\Laravel\LakeServiceProvider::registerDriver($capsule->getContainer());
+$capsule->addConnection(['driver' => 'lake', /* ... */], 'lake');
+```
+
+The low-level API stays available from Laravel:
+`DB::connection('lake')->getPdo()->connection()` returns the
+`TiDBCloud\Lake\Connection` (e.g. for `streamLoad()`).
+
+### PDO adapter
+
+`LakePdo` extends `\PDO` and works anywhere PDO is expected:
+
+```php
+use TiDBCloud\Lake\Pdo\LakePdo;
+
+$pdo = LakePdo::fromDsn('lake://user:password@lake.tidbcloud.com:443/default?warehouse=wh');
+$stmt = $pdo->prepare('SELECT title, price FROM books WHERE price > ?');
+$stmt->execute([10]);
+$books = $stmt->fetchAll(PDO::FETCH_ASSOC);
+```
+
+It supports `prepare` / `bindValue` / `bindParam` / `execute`, `query`,
+`exec`, the `FETCH_ASSOC` / `NUM` / `BOTH` / `OBJ` / `COLUMN` fetch modes,
+`rowCount()`, transactions and `quote()`. Like the rest of the driver, values
+are interpolated client-side as SQL literals. Errors are thrown as
+`PDOException` with the original `LakeException` as `getPrevious()`.
+`lastInsertId()` is not supported.
+
+`inTransaction()` follows the transaction state the server reports, so
+`BEGIN` / `COMMIT` / `ROLLBACK` sent with `exec()` count too. After a statement
+fails inside a transaction (Lake then aborts the transaction), `commit()` rolls
+back and throws instead of reporting success.
 
 ## Protocol notes
 
@@ -228,6 +305,15 @@ public function index(Connection $lake)
 - Incomplete results are paged with `GET <next_uri>`; `final_uri` is called
   when the result is fully read or `Rows::close()` is invoked; `kill_uri`
   is available via `Client::killQuery()`.
+- Requests that fail in transit are retried, except a statement that may
+  already have run: a timeout or a dropped connection can come after the
+  server received it. Such a `POST /v1/query` is sent again only if the
+  request provably never left (Guzzle's cURL handler reports no bytes sent)
+  or the statement only reads (`SELECT`, `SHOW`, `DESC`, `PRESIGN`).
+  Otherwise `QueryOutcomeUnknownException` is thrown (in Laravel, a
+  `QueryException` saying the statement "may or may not have run"): check
+  its effect before running it again. Inside a transaction, the
+  transaction can then only be rolled back.
 - Headers sent on every request: `Authorization` (Basic or Bearer),
   `X-DATABEND-TENANT`, `X-DATABEND-WAREHOUSE`, `X-DATABEND-QUERY-ID`,
   `X-DATABEND-ROUTE: warehouse`, `X-DATABEND-ROUTE-HINT`, and
@@ -238,7 +324,6 @@ public function index(Connection $lake)
 
 - Arrow result transport (JSON only)
 - Server-side prepared statements (the HTTP API is client-interpolated)
-- Laravel-specific package/service provider
 
 ## Development
 
@@ -252,6 +337,7 @@ make test-docker
 # Start a local Lake server stack (minio + meta + query) in Docker and run
 # the integration test group against it, then tear it down:
 make integration
+make integration IT_LARAVEL='9.*'   # pin the Laravel version under test
 ```
 
 Unit tests run against an in-memory PSR-18 mock — no server or network is
@@ -259,5 +345,6 @@ required. Integration tests (`tests/Integration/`, `@group integration`) are
 gated by `LAKE_DSN` and skipped without it; `make integration` provisions a
 self-contained server stack under `tests/docker/` and can also be pointed at
 any real warehouse via `IT_DSN=...`. CI (`.github/workflows/ci.yaml`) runs
-the unit matrix on PHP 8.1–8.4 plus the dockerized integration job for every
-push and pull request against `main`.
+the unit matrix on PHP 8.1–8.4 across Laravel 9–12, plus the dockerized
+integration job on Laravel 9 and 12, for every push and pull request against
+`main`.
